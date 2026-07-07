@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import { authApi, User } from "@/services/auth";
 import { tokenService } from "@/services/token";
-import { getApiErrorMessage } from "@/services/api";
+import { getApiErrorMessage, isAuthError } from "@/services/api";
+import { userCache } from "@/services/userCache";
 import { queryClient } from "@/services/queryClient";
 import { queryPersister } from "@/services/queryPersister";
 
@@ -46,11 +47,26 @@ export const useAuthStore = create<AuthState>((set) => ({
         return;
       }
 
-      const { user } = await authApi.refresh(refreshToken);
+      const { user } = await authApi.refresh();
       set({ isAuthenticated: true, user, isInitialized: true });
-    } catch {
-      await tokenService.clearAll();
-      set({ isAuthenticated: false, user: null, isInitialized: true });
+    } catch (e) {
+      if (isAuthError(e)) {
+        // 세션이 실제로 무효 (refresh token 만료/폐기) — 토큰 삭제 후 로그인 화면
+        await tokenService.clearAll();
+        await userCache.clear();
+        set({ isAuthenticated: false, user: null, isInitialized: true });
+        return;
+      }
+
+      // 네트워크 오류·타임아웃·서버 장애: 토큰을 절대 지우지 않는다.
+      // 마지막 사용자 스냅샷이 있으면 그대로 진입 — 네트워크 복구 후 첫 401 에서
+      // 인터셉터가 자동으로 refresh 해 세션이 이어진다.
+      const cachedUser = await userCache.get<User>();
+      set({
+        isAuthenticated: cachedUser != null,
+        user: cachedUser,
+        isInitialized: true,
+      });
     }
   },
 
@@ -134,11 +150,15 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   updateProfile: async (data) => {
     const user = await authApi.updateProfile(data);
+    await userCache.set(user);
     set({ user });
     return user;
   },
 
-  syncUser: (user) => set({ user }),
+  syncUser: (user) => {
+    void userCache.set(user);
+    set({ user });
+  },
 
   clearError: () => set({ error: null }),
 }));

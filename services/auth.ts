@@ -1,6 +1,6 @@
-import axios from "axios";
-import api, { API_BASE_URL } from "./api";
+import api, { refreshTokens } from "./api";
 import { tokenService } from "./token";
+import { userCache } from "./userCache";
 
 export interface User {
   id: string;
@@ -33,6 +33,7 @@ interface AuthResponse {
 const saveTokens = async (data: AuthResponse) => {
   tokenService.setAccessToken(data.accessToken);
   await tokenService.setRefreshToken(data.refreshToken);
+  await userCache.set(data.user);
 };
 
 export const authApi = {
@@ -70,15 +71,11 @@ export const authApi = {
     return data;
   },
 
-  refresh: async (refreshToken: string) => {
-    // 인터셉터를 우회하여 이중 refresh 방지
-    const { data } = await axios.post<AuthResponse>(
-      `${API_BASE_URL}/auth/refresh`,
-      { refreshToken },
-      { timeout: 10_000 },
-    );
-    await saveTokens(data);
-    return data;
+  refresh: async () => {
+    // api.ts 의 single-flight 경로로 위임 — 인터셉터와 동시 실행 시에도
+    // 실제 refresh 요청은 하나만 나간다. 토큰/스냅샷 저장도 그쪽에서 처리.
+    const data = await refreshTokens();
+    return data as AuthResponse;
   },
 
   logout: async () => {
@@ -86,6 +83,7 @@ export const authApi = {
       await api.post("/auth/logout");
     } finally {
       await tokenService.clearAll();
+      await userCache.clear();
     }
   },
 
@@ -105,5 +103,6 @@ export const authApi = {
   deleteAccount: async () => {
     await api.delete("/users/me");
     await tokenService.clearAll();
+    await userCache.clear();
   },
 };
